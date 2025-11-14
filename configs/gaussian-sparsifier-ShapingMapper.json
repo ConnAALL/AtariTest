@@ -1,0 +1,19 @@
+{
+  "game": "ALE/SpaceInvaders-v5",
+  "steps": 10000,
+  "min_gen": 50,
+  "popsize": 20,
+  "repeat_action_prob": 0.0,
+  "frameskip": 4,
+  "comp_cfg": {
+    "type": "gaussian",
+    "k": 10,
+    "num_gaussians": 1000,
+    "init_scale": 49.0,
+    "channel_last": true
+  },
+  "nonlinear_cfg": {
+    "type": "sparsifier",
+    "q": 90.0
+  }
+}

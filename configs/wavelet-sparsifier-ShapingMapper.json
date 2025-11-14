@@ -1,0 +1,20 @@
+{
+  "game": "ALE/SpaceInvaders-v5",
+  "steps": 10000,
+  "min_gen": 50,
+  "popsize": 20,
+  "repeat_action_prob": 0.0,
+  "frameskip": 4,
+  "comp_cfg": {
+    "type": "wavelet",
+    "k": 10,
+    "wavelet": "bior4.4",
+    "wavelet_levels": 3,
+    "mode": "reflect",
+    "channel_last": true
+  },
+  "nonlinear_cfg": {
+    "type": "sparsifier",
+    "q": 90.0
+  }
+}

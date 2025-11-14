@@ -1,0 +1,23 @@
+{
+  "game": "ALE/SpaceInvaders-v5",
+  "steps": 10000,
+  "min_gen": 50,
+  "popsize": 20,
+  "repeat_action_prob": 0.0,
+  "frameskip": 4,
+  "comp_cfg": {
+    "type": "aed",
+    "k": 10,
+    "checkpoint_path": "tmp/flax_ckpt/flax-checkpointing",
+    "encoder_features": [32, 64, 32],
+    "encoder_kernels": [[3, 3], [3, 3], [3, 3]],
+    "encoder_strides": [[2, 2], [2, 2], [2, 2]],
+    "decoder_features": [32, 32, 1],
+    "decoder_kernels": [[4, 4], [4, 4], [4, 4]],
+    "decoder_strides": [[2, 2], [2, 2], [2, 2]]
+  },
+  "nonlinear_cfg": {
+    "type": "sparsifier",
+    "q": 90.0
+  }
+}
