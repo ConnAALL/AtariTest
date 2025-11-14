@@ -2,17 +2,18 @@
 SCOPE policy using CompressionLab DCT, NonLinearLab sparsification, and ShapingLab mapping.
 Modified version of SCOPE.py that uses the lab implementations.
 """
-
+import os
 import sys
 from pathlib import Path
 import argparse
 import json
 import numpy as np
+import cv2
 import cma
 import gymnasium as gym
 import ale_py
 import jax.numpy as jnp
-
+import jax
 # Add lab paths
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR
@@ -25,7 +26,9 @@ from compressionlab.dct import DCT2DBatchCompressor
 from compressionlab.dft import DFTBatchCompressor
 from compressionlab.wavelet import Wavelet2DBatchCompressor, pad_to_levels, crop_to_hw
 from compressionlab.convolution import Conv2DCompressor
-from compressionlab.gaussian import GaussianSplattingBatchCompressor
+from CompressionLab.compressionlab.gaussian import GaussianSplattingBatchCompressor
+from compressionlab.autoencoder import AEDCompressor
+from compressionlab.autoencoder import AutoEncoderDecoder
 from NonLinearLab.nonlinearlab.sparsification import Sparsifier
 from NonLinearLab.nonlinearlab.quantization import Quantizer
 from NonLinearLab.nonlinearlab.DropoutRegularization import Dropout
@@ -81,7 +84,9 @@ class SCOPE_env:
         # Lazy-build compressor with image dimensions
         if self.compressor is None:
             h, w = frame.shape
-            comp_type = self.comp_cfg.get("type", "wavelet").lower()
+            comp_type = self.comp_cfg.get("type", "dct").lower()
+
+            print(f"DEBUG: Building compressor type: {comp_type}")
             
             if comp_type == "dct":
                 self.compressor = DCT2DBatchCompressor(
@@ -109,10 +114,106 @@ class SCOPE_env:
                     mode=self.comp_cfg.get("mode", "reflect"),
                     channel_last=bool(self.comp_cfg.get("channel_last", True)),
                 )
+            elif comp_type == "gaussian":
+                self.compressor = GaussianSplattingBatchCompressor(
+                    num_gaussians=int(self.comp_cfg.get("num_gaussians", 1000)),
+                    init_scale=float(self.comp_cfg.get("init_scale", 49.0)),
+                    channel_last=bool(self.comp_cfg.get("channel_last", True)),
+                    device=self.comp_cfg.get("device", "cuda")
+                )
+
+            elif comp_type == "conv":            
+                # Get kernel type from config
+                kernel_type = self.comp_cfg.get("kernel_type", "gaussian").lower()
+                kernel_size = int(self.comp_cfg.get("kernel_size", 5))
+                
+                if kernel_type == "gaussian":
+                    # Gaussian blur kernel
+                    sigma = float(self.comp_cfg.get("sigma", 1.0))
+                    gaussian_kernel_1d = cv2.getGaussianKernel(kernel_size, sigma, ktype=cv2.CV_32F)
+                    kernel = jnp.array(gaussian_kernel_1d @ gaussian_kernel_1d.T)
+                    
+                elif kernel_type == "laplacian":
+                    # Laplacian edge detection kernel
+                    kernel = jnp.array([
+                        [0, 1, 0],
+                        [1, -4, 1],
+                        [0, 1, 0]
+                    ], dtype=jnp.float32)
+                    
+                elif kernel_type == "sharpen":
+                    # Sharpening kernel using unsharp masking
+                    sigma = float(self.comp_cfg.get("sigma", 1.0))
+                    gaussian_kernel_1d = cv2.getGaussianKernel(kernel_size, sigma, ktype=cv2.CV_32F)
+                    gaussian_kernel_2d = jnp.array(gaussian_kernel_1d @ gaussian_kernel_1d.T)
+                    delta_kernel = jnp.zeros((kernel_size, kernel_size), dtype=jnp.float32)
+                    delta_kernel = delta_kernel.at[kernel_size//2, kernel_size//2].set(1.0)
+                    kernel = 2.0 * delta_kernel - gaussian_kernel_2d
+                    
+                elif kernel_type == "sobel_x":
+                    # Sobel X (horizontal edges)
+                    kernel = jnp.array([
+                        [-1, 0, 1],
+                        [-2, 0, 2],
+                        [-1, 0, 1]
+                    ], dtype=jnp.float32)
+                    
+                elif kernel_type == "sobel_y":
+                    # Sobel Y (vertical edges)
+                    kernel = jnp.array([
+                        [-1, -2, -1],
+                        [0, 0, 0],
+                        [1, 2, 1]
+                    ], dtype=jnp.float32)
+                    
+                else:
+                    raise ValueError(f"Unsupported kernel type: {kernel_type}")
+                
+                self.compressor = Conv2DCompressor(kernel=kernel)
+
+            elif comp_type == "aed":
+                # Load pre-trained AED model from checkpoint
+                checkpoint_path = self.comp_cfg.get("checkpoint_path", "tmp/flax_ckpt/flax-checkpointing")
+                
+                if os.path.exists(checkpoint_path):
+                    self.compressor = AEDCompressor.load_checkpoint(checkpoint_path)
+                    print(f"DEBUG: AEDCompressor loaded from {checkpoint_path}")
+                else:                 
+                    encoder_features = tuple(self.comp_cfg.get("encoder_features", [32, 64, 32]))
+                    encoder_kernels = tuple(tuple(k) for k in self.comp_cfg.get("encoder_kernels", [[3,3], [3,3], [3,3]]))
+                    encoder_strides = tuple(tuple(s) for s in self.comp_cfg.get("encoder_strides", [[2,2], [2,2], [2,2]]))
+                    decoder_features = tuple(self.comp_cfg.get("decoder_features", [32, 32, 1]))
+                    decoder_kernels = tuple(tuple(k) for k in self.comp_cfg.get("decoder_kernels", [[4,4], [4,4], [4,4]]))
+                    decoder_strides = tuple(tuple(s) for s in self.comp_cfg.get("decoder_strides", [[2,2], [2,2], [2,2]]))
+                    
+                    model = AutoEncoderDecoder(
+                        encoder_features=encoder_features,
+                        encoder_kernels=encoder_kernels,
+                        encoder_strides=encoder_strides,
+                        decoder_features=decoder_features,
+                        decoder_kernels=decoder_kernels,
+                        decoder_strides=decoder_strides,
+                    )
+                    
+                    # Initialize with dummy input - ADD CHANNEL DIMENSION
+                    x_example = jnp.ones((1, h, w, 1), dtype=jnp.float32)  # (B, H, W, C)
+                    variables = model.init(jax.random.key(0), x_example, method=model.init_all)
+                    
+                    self.compressor = AEDCompressor(model=model, variables=variables)
             else:
                 raise ValueError(f"Unsupported compressor type: {comp_type}")
         
         frame_batch = frame[None, ...]
+        
+        # Get compressor type 
+        comp_type = self.comp_cfg.get("type", "dct").lower()
+
+        if comp_type == "aed":
+            # AED needs (B, H, W, C) format
+            frame_batch = jnp.array(frame[None, ..., None])  # (1, H, W, 1)
+        else:
+            # DCT, DFT, Wavelet, Gaussian use (B, H, W) format
+            frame_batch = frame[None, ...]  # (1, H, W)
         
         # For wavelet, pad the input to satisfy dimension requirements
         if self.wavelet_levels is not None:
@@ -122,22 +223,56 @@ class SCOPE_env:
         else:
             coeffs = self.compressor(frame_batch)
 
-        # Coeffs may have batch/channel dims; extract 2D k×k block
-        if coeffs.ndim == 3:  # (B, k, k)
-            coeffs_2d = coeffs[0]
-        elif coeffs.ndim == 4:  # (B, k, k, C)
-            coeffs_2d = coeffs[0, :, :, 0]
+        # Handle different compressor output formats
+        if comp_type == "gaussian":
+            # Gaussian outputs (B, num_gaussians, param_dim)
+            # Extract a k×k feature matrix from the parameters
+            coeffs_flat = coeffs[0].flatten()  # Flatten all parameters
+            
+            # Take first k*k elements and reshape to k×k
+            num_elements = self.k * self.k
+            if len(coeffs_flat) < num_elements:
+                # Pad with zeros if not enough elements
+                coeffs_flat = jnp.pad(coeffs_flat, (0, num_elements - len(coeffs_flat)))
+            
+            coeffs_2d = coeffs_flat[:num_elements].reshape(self.k, self.k)
+
+        elif comp_type == "aed":
+            # AED outputs (B, H', W', C') latent representation
+            # Flatten and reshape to k×k
+            coeffs_flat = coeffs[0].flatten()  # Flatten spatial dimensions
+            
+            num_elements = self.k * self.k
+            if len(coeffs_flat) < num_elements:
+                # Pad with zeros if not enough elements
+                coeffs_flat = jnp.pad(coeffs_flat, (0, num_elements - len(coeffs_flat)))
+            
+            coeffs_2d = coeffs_flat[:num_elements].reshape(self.k, self.k)
+
+        elif comp_type == "conv":
+            # Conv outputs (B, H, W) - same shape as input
+            # Extract k×k block from top-left corner
+            coeffs_2d = coeffs[0]  # Remove batch dimension -> (H, W)
+            coeffs_2d = coeffs_2d[: self.k, : self.k]  # Extract k×k block
+
         else:
-            coeffs_2d = coeffs.squeeze()
-            if coeffs_2d.ndim != 2:
-                raise ValueError(f"Unexpected compressor output shape: {coeffs.shape}")
+            # DCT/DFT/Wavelet path
+            # Coeffs may have batch/channel dims; extract 2D k×k block
+            if coeffs.ndim == 3:  # (B, k, k)
+                coeffs_2d = coeffs[0]
+            elif coeffs.ndim == 4:  # (B, k, k, C)
+                coeffs_2d = coeffs[0, :, :, 0]
+            else:
+                coeffs_2d = coeffs.squeeze()
+                if coeffs_2d.ndim != 2:
+                    raise ValueError(f"Unexpected compressor output shape: {coeffs.shape}")
 
-        # If complex (DFT), convert to magnitude to get real-valued features
-        if jnp.iscomplexobj(coeffs_2d):
-            coeffs_2d = jnp.abs(coeffs_2d)
+            # If complex (DFT), convert to magnitude to get real-valued features
+            if jnp.iscomplexobj(coeffs_2d):
+                coeffs_2d = jnp.abs(coeffs_2d)
 
-        # Ensure k×k top-left block for shaping mapper (DFT may retain full H×W)
-        coeffs_2d = coeffs_2d[: self.k, : self.k]
+            # Ensure k×k top-left block for shaping mapper (DFT may retain full H×W)
+            coeffs_2d = coeffs_2d[: self.k, : self.k]
 
         # Prepare input for ShapingMapper: (B=1, M=k, N=k, C=1)
         X = jnp.asarray(np.asarray(coeffs_2d)[None, ..., None], dtype=jnp.float32)
