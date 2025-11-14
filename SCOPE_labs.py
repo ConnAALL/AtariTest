@@ -23,11 +23,13 @@ sys.path.insert(0, str(REPO_ROOT / "ShapingLab"))
 
 from compressionlab.dct import DCT2DBatchCompressor
 from compressionlab.dft import DFTBatchCompressor
-from compressionlab.wavelet import Wavelet2DBatchCompressor
-from nonlinearlab.sparsification import Sparsifier
-from nonlinearlab.quantization import Quantizer
-from nonlinearlab.DropoutRegularization import Dropout
-from shapinglab.shaping import ShapingMapper
+from compressionlab.wavelet import Wavelet2DBatchCompressor, pad_to_levels, crop_to_hw
+from compressionlab.convolution import Conv2DCompressor
+from compressionlab.gaussian import GaussianSplattingBatchCompressor
+from NonLinearLab.nonlinearlab.sparsification import Sparsifier
+from NonLinearLab.nonlinearlab.quantization import Quantizer
+from NonLinearLab.nonlinearlab.DropoutRegularization import Dropout
+from ShapingLab.shapinglab.shaping import ShapingMapper
 
 class SCOPE_env:
     def __init__(self, chromosome: list, output_size: int, comp_cfg: dict, nonlinear_cfg: dict):
@@ -40,6 +42,7 @@ class SCOPE_env:
             raise ValueError("comp_cfg.k must be provided and > 0 for dct/dft shaping.")
         self.output_size = output_size
         self.compressor = None
+        self.wavelet_levels = None  # Store levels for padding
         # Nonlinear operator selection
         nl_type = (self.nonlinear_cfg.get("type") or "sparsifier").lower()
         if nl_type == "sparsifier":
@@ -78,7 +81,8 @@ class SCOPE_env:
         # Lazy-build compressor with image dimensions
         if self.compressor is None:
             h, w = frame.shape
-            comp_type = (self.comp_cfg.get("type") or "dct").lower()
+            comp_type = self.comp_cfg.get("type", "wavelet").lower()
+            
             if comp_type == "dct":
                 self.compressor = DCT2DBatchCompressor(
                     channel_last=bool(self.comp_cfg.get("channel_last", True)),
@@ -98,13 +102,25 @@ class SCOPE_env:
                     k=self.k,
                 )
             elif comp_type == "wavelet":
-                # Not yet supported by shaping input assumptions (k x k). Provide early error.
-                raise NotImplementedError("Wavelet compression not supported in SCOPE_labs shaping pipeline yet.")
+                self.wavelet_levels = int(self.comp_cfg.get("wavelet_levels", 3))
+                self.compressor = Wavelet2DBatchCompressor(
+                    wavelet=self.comp_cfg.get("wavelet", "bior4.4"),
+                    levels=self.wavelet_levels,
+                    mode=self.comp_cfg.get("mode", "reflect"),
+                    channel_last=bool(self.comp_cfg.get("channel_last", True)),
+                )
             else:
-                raise NotImplementedError(f"Unsupported compressor type: {comp_type}")
+                raise ValueError(f"Unsupported compressor type: {comp_type}")
         
         frame_batch = frame[None, ...]
-        coeffs = self.compressor(frame_batch)
+        
+        # For wavelet, pad the input to satisfy dimension requirements
+        if self.wavelet_levels is not None:
+            frame_batch_jax = jnp.array(frame_batch)
+            frame_padded, hw_orig = pad_to_levels(frame_batch_jax, self.wavelet_levels, channel_last=True)
+            coeffs = self.compressor(frame_padded)
+        else:
+            coeffs = self.compressor(frame_batch)
 
         # Coeffs may have batch/channel dims; extract 2D k×k block
         if coeffs.ndim == 3:  # (B, k, k)
