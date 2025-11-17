@@ -4,6 +4,7 @@ import logging
 import os
 import pickle
 import hydra
+import csv
 import jax
 import json
 import numpy as np
@@ -14,6 +15,7 @@ from omegaconf import OmegaConf
 from dataclasses import dataclass, asdict, field
 from typing import List, Tuple, Optional
 from hydra.core.config_store import ConfigStore
+from hydra.utils import get_original_cwd
 
 import gymnasium as gym
 import ale_py
@@ -193,6 +195,18 @@ def train(cfg: Config):
     rng = jax.random.PRNGKey(42)
     env = make_env(cfg)
     
+    # Prepare CSV logging per combination: {compression}_{nonlinearity}_{mapping}_data.csv
+    combo_name = f"{cfg.comp_cfg.type}_sparsifier_ShapingMapper"
+    data_dir = os.path.join(get_original_cwd(), "data")
+    os.makedirs(data_dir, exist_ok=True)
+    csv_path = os.path.join(data_dir, f"{combo_name}_data.csv")
+    init_header = not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0
+    csv_file = open(csv_path, "a", newline="")
+    csv_writer = csv.writer(csv_file)
+    if init_header:
+        csv_writer.writerow(["generation", "individual", "score"])
+        csv_file.flush()
+    
     # Initialize CMA-ES
     rng, _rng = jax.random.split(rng)
     if cfg.train_cfg.resume:
@@ -252,6 +266,10 @@ def train(cfg: Config):
             
             if solution_idx % 10 == 0:
                 print(f"Evaluated solution {solution_idx + 1}/{len(sols)}, reward: {total_reward:.2f}")
+            
+            # Log to CSV: generation, individual, score
+            csv_writer.writerow([generation, solution_idx + 1, float(total_reward)])
+            csv_file.flush()
         
         return np.array(losses)
 
@@ -380,6 +398,10 @@ def train(cfg: Config):
     plt.close()
     
     env.close()
+    try:
+        csv_file.close()
+    except Exception:
+        pass
 
 if __name__ == '__main__':
     train()
