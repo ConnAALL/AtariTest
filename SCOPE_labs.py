@@ -14,6 +14,7 @@ import gymnasium as gym
 import ale_py
 import jax.numpy as jnp
 import jax
+import csv
 # Add lab paths
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR
@@ -358,6 +359,20 @@ def main():
 
     best_overall_reward = float("-inf")
 
+    # CSV logging: data/{compression}_{nonlinearity}_{mapping}_data.csv
+    comp_name = str(comp_cfg.get("type", "unknown"))
+    nonlinear_name = str(nonlinear_cfg.get("type", "unknown"))
+    mapping_name = "ShapingMapper"
+    data_dir = REPO_ROOT / "data"
+    os.makedirs(data_dir, exist_ok=True)
+    csv_path = data_dir / f"{comp_name}_{nonlinear_name}_{mapping_name}_data.csv"
+    init_header = (not csv_path.exists()) or (csv_path.stat().st_size == 0)
+    csv_file = open(csv_path, "a", newline="")
+    csv_writer = csv.writer(csv_file)
+    if init_header:
+        csv_writer.writerow(["generation", "individual", "score"])
+        csv_file.flush()
+
     for generation in range(CONFIG["GENERATIONS"]):
         solutions = es.ask()
         rewards = []
@@ -365,6 +380,10 @@ def main():
         for index, solution in enumerate(solutions):
             avg_reward = evaluate_individual(solution, game, output_size, CONFIG, comp_cfg, nonlinear_cfg)
             rewards.append(-avg_reward)  # Negative fitness as CMA-ES minimizes
+
+            # Log per-individual score
+            csv_writer.writerow([generation, index + 1, float(avg_reward)])
+            csv_file.flush()
 
             if avg_reward > best_overall_reward:
                 best_overall_reward = avg_reward
@@ -376,6 +395,11 @@ def main():
         best_gen_reward = -min(rewards)
         avg_gen_reward = -np.mean(rewards)
         print(f"[GEN {generation+1}] Best: {best_gen_reward:.2f} | Avg: {avg_gen_reward:.2f} | Best Overall: {best_overall_reward:.2f}")
+
+    try:
+        csv_file.close()
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     main()
