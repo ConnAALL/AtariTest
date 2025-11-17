@@ -3,3 +3,4 @@ CompressionLab
 NonLinearLab
 ShapingLab
 SCOPE-for-Atari
+*.pycache
